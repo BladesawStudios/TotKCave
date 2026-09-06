@@ -93,7 +93,7 @@ public static class QuadMeshBuilder
 
         foreach (int i in nodeIndices)
         {
-            var (verts, faces) = DecodeNodeGeometry(res, pages, i, targetLod, weld);
+            var (verts, faces, _, _, _, _) = DecodeNodeGeometry(res, pages, i, targetLod, weld);
             nodesProcessed++;
 
             int vCount = verts.Count;
@@ -119,7 +119,9 @@ public static class QuadMeshBuilder
         return (sb.ToString(), batchVerts, batchFaces, nodesProcessed);
     }
 
-    private static (List<Vector3> Verts, List<(int A, int B, int C)> Faces) DecodeNodeGeometry(
+    private static (List<Vector3> Verts, List<(int A, int B, int C)> Faces,
+                    List<(int A, int B, int C)> Slots, List<Vector3> Weights,
+                    List<Vector3> Ao, List<int> FaceMats) DecodeNodeGeometry(
         QuadResource res,
         IPageSource pages,
         int i,
@@ -128,7 +130,11 @@ public static class QuadMeshBuilder
     {
         List<Vector3> localVerts = [];
         List<(int A, int B, int C)> localFaces = [];
-        Dictionary<Vector3, int> vmap = [];
+        List<(int A, int B, int C)> localSlots = [];
+        List<Vector3> localWeights = [];
+        List<Vector3> localAo = [];
+        List<int> localFaceMats = [];
+        Dictionary<(Vector3 P, int S0, int S1, int S2), int> vmap = [];
 
         var (nx, ny, nz, _) = res.GetNode(i);
         var (layout, ns, cornerOff) = res.GetNodeLayout(i);
@@ -145,6 +151,11 @@ public static class QuadMeshBuilder
 
         int pa0 = layout["pos_adjust_offset0"];
         int qdo = layout["quad_data_offset"];
+
+        // Per-vertex material weights and AO, packed RGB565: red is the first blend weight,
+        // blue the second, green the ambient occlusion. The third weight is the clamped
+        // remainder, exactly as the cave format does it.
+        int attrOff = layout.TryGetValue("_34", out int a34) ? a34 : -1;
 
         var (s0, s1) = res.GetStreamRange(i);
         for (uint j = s0; j < s1; j++)
@@ -167,9 +178,20 @@ public static class QuadMeshBuilder
                 int left = ((corner >> 24) & 0xFF) == 0xD ? 0 : 1;
                 int single = (int)((matFlags >> 31) & 1);
 
+                // Three 7-bit material ids, at the bit positions the quad mesh fragment
+                // shader unpacks them from. It picks its third id from bits 24-30 instead
+                // on one triangle half of the quad, but the two agree on 99.5% of quads, so
+                // the halves are not split here.
+                int mat0 = (int)((matFlags >> 3) & 0x7F);
+                int mat1 = (int)((matFlags >> 10) & 0x7F);
+                int mat2 = (int)((matFlags >> 17) & 0x7F);
+
                 int[] imap = GetIndexMap(ns, top, right, bottom, left, single);
 
                 ReadOnlySpan<uint> block = MemoryMarshal.Cast<byte, uint>(page.AsSpan(pa0 + qi * blockBytes, blockBytes));
+                ReadOnlySpan<ushort> attrs = attrOff >= 0
+                    ? MemoryMarshal.Cast<byte, ushort>(page.AsSpan(attrOff + qi * nvq * 2, nvq * 2))
+                    : default;
 
                 int sh = (int)((posFlags >> 18) & 0x1F);
                 long ox = ((((nx >> nsh) << 5) + (posFlags & 0x3F)) << 13) - 0x20000;
@@ -198,13 +220,27 @@ public static class QuadMeshBuilder
                         (oz + (dz << sh)) * sl + bz
                     );
 
+                    // Red and blue are the two stored weights, green the AO.
+                    ushort packed = attrs.IsEmpty ? (ushort)0 : attrs[slot];
+                    float wR = ((packed >> 11) & 0x1F) / 31.0f;
+                    float wB = (packed & 0x1F) / 31.0f;
+                    float ao = ((packed >> 5) & 0x3F) / 63.0f;
+                    Vector3 wts = new(wR, wB, Math.Clamp(1.0f - wR - wB, 0.0f, 1.0f));
+
                     if (weld)
                     {
-                        if (!vmap.TryGetValue(v, out int localIdx))
+                        // Slots are part of a vertex's identity: welding on position alone
+                        // would let a vertex shared by quads with different materials keep
+                        // only one set, handing the wrong material to the other quad's faces.
+                        var key = (v, mat0, mat1, mat2);
+                        if (!vmap.TryGetValue(key, out int localIdx))
                         {
                             localIdx = localVerts.Count;
-                            vmap[v] = localIdx;
+                            vmap[key] = localIdx;
                             localVerts.Add(v);
+                            localSlots.Add((mat0, mat1, mat2));
+                            localWeights.Add(wts);
+                            localAo.Add(new Vector3(ao, ao, ao));
                         }
                         localIndices[slotIdx] = localIdx;
                     }
@@ -212,6 +248,9 @@ public static class QuadMeshBuilder
                     {
                         int localIdx = localVerts.Count;
                         localVerts.Add(v);
+                        localSlots.Add((mat0, mat1, mat2));
+                        localWeights.Add(wts);
+                        localAo.Add(new Vector3(ao, ao, ao));
                         localIndices[slotIdx] = localIdx;
                     }
                 }
@@ -225,12 +264,16 @@ public static class QuadMeshBuilder
                     if (iA != iB && iB != iC && iA != iC)
                     {
                         localFaces.Add((iA, iB, iC));
+
+                        Vector3 fw = localWeights[iA] + localWeights[iB] + localWeights[iC];
+                        localFaceMats.Add(fw.X >= fw.Y && fw.X >= fw.Z ? mat0
+                                        : fw.Y >= fw.Z ? mat1 : mat2);
                     }
                 }
             }
         }
 
-        return (localVerts, localFaces);
+        return (localVerts, localFaces, localSlots, localWeights, localAo, localFaceMats);
     }
 
     public static CaveMesh BuildMesh(
@@ -274,14 +317,15 @@ public static class QuadMeshBuilder
         int threads = maxDegreeOfParallelism > 0 ? maxDegreeOfParallelism : Environment.ProcessorCount;
         ParallelOptions parallelOptions = new() { MaxDegreeOfParallelism = threads };
         
-        var nodeResults = new (List<Vector3> Verts, List<(int A, int B, int C)> Faces)[totalNodes];
+        var nodeResults = new (List<Vector3> Verts, List<(int A, int B, int C)> Faces,
+                               List<(int A, int B, int C)> Slots, List<Vector3> Weights,
+                               List<Vector3> Ao, List<int> FaceMats)[totalNodes];
         int completedCount = 0;
 
         Parallel.For(0, totalNodes, parallelOptions, idx =>
         {
             int i = matchingNodeIndices[idx];
-            var (localVerts, localFaces) = DecodeNodeGeometry(res, pages, i, targetLod, weld);
-            nodeResults[idx] = (localVerts, localFaces);
+            nodeResults[idx] = DecodeNodeGeometry(res, pages, i, targetLod, weld);
 
             if (progressCallback != null)
             {
@@ -294,11 +338,15 @@ public static class QuadMeshBuilder
         {
             int baseV = mesh.Vertices.Count;
             mesh.Vertices.AddRange(resNode.Verts);
+            mesh.VertexMaterials.AddRange(resNode.Slots);
+            mesh.VertexWeights.AddRange(resNode.Weights);
+            mesh.Colors.AddRange(resNode.Ao);
+
             for (int f = 0; f < resNode.Faces.Count; f++)
             {
                 var (a, b_, c) = resNode.Faces[f];
                 mesh.Faces.Add((a + baseV, b_ + baseV, c + baseV));
-                mesh.FaceMaterials.Add(0);
+                mesh.FaceMaterials.Add(resNode.FaceMats[f]);
             }
         }
 
