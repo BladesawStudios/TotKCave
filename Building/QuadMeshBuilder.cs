@@ -152,10 +152,18 @@ public static class QuadMeshBuilder
         int pa0 = layout["pos_adjust_offset0"];
         int qdo = layout["quad_data_offset"];
 
-        // Per-vertex material weights and AO, packed RGB565: red is the first blend weight,
-        // blue the second, green the ambient occlusion. The third weight is the clamped
-        // remainder, exactly as the cave format does it.
-        int attrOff = layout.TryGetValue("_34", out int a34) ? a34 : -1;
+        // Two per-vertex 2-byte maps, back to back: the weights and AO the shader calls
+        // cCaveQuadMeshMaterialWeights_Ao, then the normals it calls cCaveQuadMeshNormals.
+        //
+        // They are easy to mix up - both are RGB565-shaped - so tell them apart by what the
+        // fields do across the vertex grid. Weights vary smoothly: in the first block the
+        // red and blue channels have a mean neighbour difference of 0.055 and 0.108, against
+        // 0.133 for the vertex positions and 0.322 for the same values shuffled. In the
+        // second they are 0.239 and 0.257, barely better than shuffled, because they are a
+        // normal's tangential pair - and they satisfy |x| + |y| <= 1, the octahedral
+        // constraint, on every vertex. Reading the normals as weights makes the dominant
+        // material alternate vertex to vertex and the terrain break into flat triangles.
+        int weightsOff = layout.TryGetValue("_30", out int a30) ? a30 : -1;
 
         var (s0, s1) = res.GetStreamRange(i);
         for (uint j = s0; j < s1; j++)
@@ -189,8 +197,8 @@ public static class QuadMeshBuilder
                 int[] imap = GetIndexMap(ns, top, right, bottom, left, single);
 
                 ReadOnlySpan<uint> block = MemoryMarshal.Cast<byte, uint>(page.AsSpan(pa0 + qi * blockBytes, blockBytes));
-                ReadOnlySpan<ushort> attrs = attrOff >= 0
-                    ? MemoryMarshal.Cast<byte, ushort>(page.AsSpan(attrOff + qi * nvq * 2, nvq * 2))
+                ReadOnlySpan<ushort> attrs = weightsOff >= 0
+                    ? MemoryMarshal.Cast<byte, ushort>(page.AsSpan(weightsOff + qi * nvq * 2, nvq * 2))
                     : default;
 
                 int sh = (int)((posFlags >> 18) & 0x1F);
@@ -220,7 +228,9 @@ public static class QuadMeshBuilder
                         (oz + (dz << sh)) * sl + bz
                     );
 
-                    // Red and blue are the two stored weights, green the AO.
+                    // Red and blue are the two stored weights, green the AO. The pair
+                    // routinely sums past 1, which is why the third weight is clamped rather
+                    // than simply being the remainder.
                     ushort packed = attrs.IsEmpty ? (ushort)0 : attrs[slot];
                     float wR = ((packed >> 11) & 0x1F) / 31.0f;
                     float wB = (packed & 0x1F) / 31.0f;
