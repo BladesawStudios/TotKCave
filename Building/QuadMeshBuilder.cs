@@ -239,18 +239,31 @@ public static class QuadMeshBuilder
         int? lod = null,
         bool weld = true,
         int maxDegreeOfParallelism = -1,
-        Action<int, int>? progressCallback = null)
+        Action<int, int>? progressCallback = null,
+        IReadOnlyList<QuadRegion>? regions = null)
     {
         int targetLod = lod ?? res.MaxLod;
         CaveMesh mesh = new();
 
+        // A region list rather than one rectangle, so a caller can pick scattered map
+        // sections without also pulling in everything between them.
+        bool filtered = regions is { Count: > 0 };
+
         List<int> matchingNodeIndices = [];
         for (int i = 0; i < res.NodeCount; i++)
         {
-            if (res.GetNodeLod(i) == targetLod)
+            if (res.GetNodeLod(i) != targetLod) continue;
+
+            if (filtered)
             {
-                matchingNodeIndices.Add(i);
+                var nb = res.GetNodeBounds(i);
+                bool hit = false;
+                for (int r = 0; r < regions!.Count && !hit; r++)
+                    hit = regions[r].Intersects(nb.MinX, nb.MinZ, nb.MaxX, nb.MaxZ);
+                if (!hit) continue;
             }
+
+            matchingNodeIndices.Add(i);
         }
 
         int totalNodes = matchingNodeIndices.Count;
