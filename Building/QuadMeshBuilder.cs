@@ -228,13 +228,19 @@ public static class QuadMeshBuilder
                         (oz + (dz << sh)) * sl + bz
                     );
 
+                    // A1RGB555, not RGB565: bit 15 is set on every texel of this block, so
+                    // it is a constant alpha and the three colour channels are 5 bits each.
+                    // Read as 5-6-5 the fields sit a bit out of place - the red channel then
+                    // never falls below half its range, and the middle field averages 0.44
+                    // and darkens everything it multiplies.
+                    //
                     // Red and blue are the two stored weights, green the AO. The pair
                     // routinely sums past 1, which is why the third weight is clamped rather
                     // than simply being the remainder.
                     ushort packed = attrs.IsEmpty ? (ushort)0 : attrs[slot];
-                    float wR = ((packed >> 11) & 0x1F) / 31.0f;
+                    float wR = ((packed >> 10) & 0x1F) / 31.0f;
                     float wB = (packed & 0x1F) / 31.0f;
-                    float ao = ((packed >> 5) & 0x3F) / 63.0f;
+                    float ao = ((packed >> 5) & 0x1F) / 31.0f;
                     Vector3 wts = new(wR, wB, Math.Clamp(1.0f - wR - wB, 0.0f, 1.0f));
 
                     if (weld)
