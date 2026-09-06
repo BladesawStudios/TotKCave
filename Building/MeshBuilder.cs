@@ -100,8 +100,16 @@ public static class MeshBuilder
                     int domMat = dec.Materials[domSlot];
                     int matIdx = node.BaseMaterial + domMat;
 
+                    // Welding by position alone merges vertices from different nodes that
+                    // coincide in space, and the survivor keeps one slot set - handing a
+                    // wrong material to every face that referenced the other. Node base
+                    // materials differ, so this corrupted about half of all faces. The
+                    // material slots are part of the identity of a vertex.
                     object key = weld
-                        ? (MathF.Round(worldPos.X, 4), MathF.Round(worldPos.Y, 4), MathF.Round(worldPos.Z, 4))
+                        ? (MathF.Round(worldPos.X, 4), MathF.Round(worldPos.Y, 4), MathF.Round(worldPos.Z, 4),
+                           node.BaseMaterial + dec.Materials[0],
+                           node.BaseMaterial + dec.Materials[1],
+                           node.BaseMaterial + dec.Materials[2])
                         : (stream.PageFile, v);
 
                     if (!vmap.TryGetValue(key, out int localIdx))
@@ -166,7 +174,7 @@ public static class MeshBuilder
             }
         });
         
-        Dictionary<(float X, float Y, float Z), int> globalVmap = [];
+        Dictionary<(float X, float Y, float Z, int S0, int S1, int S2), int> globalVmap = [];
 
         foreach (var res in nodeResults)
         {
@@ -179,7 +187,8 @@ public static class MeshBuilder
 
                 if (weld)
                 {
-                    var key = (MathF.Round(pos.X, 4), MathF.Round(pos.Y, 4), MathF.Round(pos.Z, 4));
+                    var (ms0, ms1, ms2) = res.Slots[i];
+                    var key = (MathF.Round(pos.X, 4), MathF.Round(pos.Y, 4), MathF.Round(pos.Z, 4), ms0, ms1, ms2);
                     if (!globalVmap.TryGetValue(key, out int gIdx))
                     {
                         gIdx = mesh.Vertices.Count;
