@@ -95,8 +95,18 @@ public static class MeshBuilder
 
                     Vector3 worldPos = nodeBase + new Vector3(qx * scale, qy * scale, qz * scale);
 
-                    int w0 = 31 - w1 - w2;
-                    int domSlot = GetDominantSlotIndex(w0, w1, w2);
+                    // The game reads the two stored 5-bit weights into slots 0 and 1 and
+                    // derives slot 2 as the clamped remainder:
+                    //   w[0] = raw0/31, w[1] = raw1/31, w[2] = clamp(1 - w[0] - w[1], 0, 1)
+                    // Putting the remainder in lane 0 instead rotates every weight one slot
+                    // against the material ids, which are in the same order in both, so each
+                    // vertex blended - and reported - the wrong dominant material. The clamp
+                    // matters too: the stored pair may sum past 31, and the remainder is
+                    // floored at zero rather than allowed to go negative.
+                    float wa = w1 / 31.0f;
+                    float wb = w2 / 31.0f;
+                    float wc = Math.Clamp(1.0f - wa - wb, 0.0f, 1.0f);
+                    int domSlot = GetDominantSlotIndex(wa, wb, wc);
                     int domMat = dec.Materials[domSlot];
                     int matIdx = node.BaseMaterial + domMat;
 
@@ -127,7 +137,7 @@ public static class MeshBuilder
                             node.BaseMaterial + dec.Materials[0],
                             node.BaseMaterial + dec.Materials[1],
                             node.BaseMaterial + dec.Materials[2]));
-                        localWeights.Add(new Vector3(w0, w1, w2) / 31.0f);
+                        localWeights.Add(new Vector3(wa, wb, wc));
                     }
 
                     localMap[v] = (localIdx, matIdx);
@@ -224,7 +234,7 @@ public static class MeshBuilder
         return mesh;
     }
 
-    private static int GetDominantSlotIndex(int w0, int w1, int w2)
+    private static int GetDominantSlotIndex(float w0, float w1, float w2)
     {
         if (w0 >= w1 && w0 >= w2) return 0;
         if (w1 >= w0 && w1 >= w2) return 1;
