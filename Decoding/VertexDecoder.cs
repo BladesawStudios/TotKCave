@@ -39,7 +39,10 @@ public static class VertexDecoder
         int g = (int)((high32 >> 20) & 0x3F);
         int b = (int)((high32 >> 26) & 0x3F);
 
-        Vector3 color = new(r / 63.0f, g / 63.0f, b / 63.0f);
+        // 1/64, not 1/63: the game scales these by 0.015625, which puts the stored
+        // value 32 at exactly 0.5. That is the neutral point of the vertex grade and the
+        // single most common value in the data, so 1/63 would tint the untinted case.
+        Vector3 color = new(r / 64.0f, g / 64.0f, b / 64.0f);
         int low6 = (int)(low64 & 0x3F);
 
         return new DecodedBlock(
