@@ -312,6 +312,8 @@ public static class QuadMeshBuilder
         int totalNodes = matchingNodeIndices.Count;
         if (totalNodes == 0) return mesh;
 
+        mesh.Materials = BuildQuadMaterials();
+
         progressCallback?.Invoke(0, totalNodes);
 
         int threads = maxDegreeOfParallelism > 0 ? maxDegreeOfParallelism : Environment.ProcessorCount;
@@ -351,6 +353,33 @@ public static class QuadMeshBuilder
         }
 
         return mesh;
+    }
+
+
+    /// <summary>
+    /// The material table for a quad resource. Unlike a cave, a quad resource ships no
+    /// table: its shader uses the 7-bit material id directly as the array layer, with no
+    /// indirection, so the entries here are generated rather than read.
+    /// </summary>
+    /// <remarks>
+    /// The projection is planar on world XZ, which is what a heightfield wants. The tiling
+    /// is a stand-in: the shader scales its UVs per material from a constant buffer that is
+    /// not in the archive, so the real per-material scales are not recoverable from the
+    /// shader alone. Everything else here - the layer, the projection - is exact.
+    /// </remarks>
+    private const int QuadMaterialCount = 121;
+    private const float QuadUvScale = 1.0f / 33.0f;
+
+    private static List<CrBinMaterial> BuildQuadMaterials()
+    {
+        List<CrBinMaterial> materials = new(QuadMaterialCount);
+        for (int id = 0; id < QuadMaterialCount; id++)
+        {
+            materials.Add(new CrBinMaterial(
+                new Vector3(1f, 0f, 0f), id,
+                new Vector3(0f, 0f, 1f), QuadUvScale));
+        }
+        return materials;
     }
 
     private static int[] GetIndexMap(int ns, int top, int right, int bottom, int left, int single)
