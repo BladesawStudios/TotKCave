@@ -228,20 +228,29 @@ public static class QuadMeshBuilder
                         (oz + (dz << sh)) * sl + bz
                     );
 
-                    // A1RGB555, not RGB565: bit 15 is set on every texel of this block, so
-                    // it is a constant alpha and the three colour channels are 5 bits each.
-                    // Read as 5-6-5 the fields sit a bit out of place - the red channel then
-                    // never falls below half its range, and the middle field averages 0.44
-                    // and darkens everything it multiplies.
+                    // A1RGB555: bit 15 is set on every texel of this block, so it is a
+                    // constant alpha and the three colour channels are 5 bits each. Green is
+                    // the ambient occlusion - it varies smoothly across the vertex grid
+                    // (mean neighbour difference 0.087, against 0.133 for the vertex
+                    // positions and 0.322 shuffled) and resolves into lit plateau tops and
+                    // dark crevices.
                     //
-                    // Red and blue are the two stored weights, green the AO. The pair
-                    // routinely sums past 1, which is why the third weight is clamped rather
-                    // than simply being the remainder.
+                    // The blend weights are NOT in this block, nor in the normals block, nor
+                    // in pos_adjust_offset1. Checked against the mate terrain archive, which
+                    // states the visible material per position: for a weight, its value would
+                    // have to be high exactly when its own slot is the visible one, and no
+                    // contiguous 4-6 bit field of any of those blocks separates the cases by
+                    // more than 0.07 where a real weight would separate them by about 0.5.
+                    //
+                    // The ids are ordered by prevalence instead. Over 21,112 ground samples
+                    // the first slot is the visible material 69.9% of the time, the second
+                    // 22.0% and the third 8.2%, and some slot holds it 82.8% of the time. So
+                    // weight them by that prior until the real weights are found: it agrees
+                    // with the terrain archive 57.9% of the time where the misread per-vertex
+                    // values managed 36.0%.
                     ushort packed = attrs.IsEmpty ? (ushort)0 : attrs[slot];
-                    float wR = ((packed >> 10) & 0x1F) / 31.0f;
-                    float wB = (packed & 0x1F) / 31.0f;
                     float ao = ((packed >> 5) & 0x1F) / 31.0f;
-                    Vector3 wts = new(wR, wB, Math.Clamp(1.0f - wR - wB, 0.0f, 1.0f));
+                    Vector3 wts = SlotPrior;
 
                     if (weld)
                     {
@@ -383,6 +392,13 @@ public static class QuadMeshBuilder
     /// not in the archive, so the real per-material scales are not recoverable from the
     /// shader alone. Everything else here - the layer, the projection - is exact.
     /// </remarks>
+    /// <summary>
+    /// How much each material slot contributes, from how often each turns out to be the
+    /// material the terrain archive says is visible. A stand-in for the per-vertex weights,
+    /// which are in the pages somewhere but have not been located.
+    /// </summary>
+    private static readonly Vector3 SlotPrior = new(0.699f, 0.220f, 0.082f);
+
     private const int QuadMaterialCount = 121;
     private const float QuadUvScale = 1.0f / 33.0f;
 
