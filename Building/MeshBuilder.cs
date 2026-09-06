@@ -49,7 +49,7 @@ public static class MeshBuilder
         int threads = maxDegreeOfParallelism > 0 ? maxDegreeOfParallelism : Environment.ProcessorCount;
         ParallelOptions parallelOptions = new() { MaxDegreeOfParallelism = threads };
         
-        var nodeResults = new (List<Vector3> Verts, List<Vector3> Norms, List<Vector3> Cols, List<(int A, int B, int C)> Faces, List<int> Mats, int Dropped)[totalNodes];
+        var nodeResults = new (List<Vector3> Verts, List<Vector3> Norms, List<Vector3> Cols, List<(int A, int B, int C)> Faces, List<int> Mats, List<(int A, int B, int C)> Slots, List<Vector3> Weights, int Dropped)[totalNodes];
         int completedCount = 0;
 
         Parallel.For(0, totalNodes, parallelOptions, nodeIdx =>
@@ -60,6 +60,8 @@ public static class MeshBuilder
             List<Vector3> localCols = [];
             List<(int A, int B, int C)> localFaces = [];
             List<int> localMats = [];
+            List<(int A, int B, int C)> localSlots = [];
+            List<Vector3> localWeights = [];
             int localDropped = 0;
 
             Dictionary<object, int> vmap = [];
@@ -110,6 +112,14 @@ public static class MeshBuilder
                         localVerts.Add(worldPos);
                         localNorms.Add(OctNormalDecoder.Decode(nu, nv));
                         localCols.Add(dec.Self.ColorRgb);
+
+                        // Keep the whole blend, not just the dominant slot: every vertex
+                        // carries three materials and about half of them are genuinely mixed.
+                        localSlots.Add((
+                            node.BaseMaterial + dec.Materials[0],
+                            node.BaseMaterial + dec.Materials[1],
+                            node.BaseMaterial + dec.Materials[2]));
+                        localWeights.Add(new Vector3(w0, w1, w2) / 31.0f);
                     }
 
                     localMap[v] = (localIdx, matIdx);
@@ -147,7 +157,7 @@ public static class MeshBuilder
                 }
             }
 
-            nodeResults[nodeIdx] = (localVerts, localNorms, localCols, localFaces, localMats, localDropped);
+            nodeResults[nodeIdx] = (localVerts, localNorms, localCols, localFaces, localMats, localSlots, localWeights, localDropped);
 
             if (progressCallback != null)
             {
@@ -178,6 +188,8 @@ public static class MeshBuilder
                         mesh.Vertices.Add(pos);
                         mesh.Normals.Add(res.Norms[i]);
                         mesh.Colors.Add(res.Cols[i]);
+                        mesh.VertexMaterials.Add(res.Slots[i]);
+                        mesh.VertexWeights.Add(res.Weights[i]);
                     }
                     remap[i] = gIdx;
                 }
@@ -187,6 +199,8 @@ public static class MeshBuilder
                     mesh.Vertices.Add(pos);
                     mesh.Normals.Add(res.Norms[i]);
                     mesh.Colors.Add(res.Cols[i]);
+                    mesh.VertexMaterials.Add(res.Slots[i]);
+                    mesh.VertexWeights.Add(res.Weights[i]);
                 }
             }
 
