@@ -32,6 +32,12 @@ public sealed class CaveMesh
     public int FaceMaterialCount { get; set; }
 
     /// <summary>
+    /// The second texture coordinate, for a surface whose material layers two textures and
+    /// lays the upper one out separately from the lower.
+    /// </summary>
+    public List<Vector2> Uvs2 { get; } = [];
+
+    /// <summary>
     /// The alpha of a vertex's own colour, which is how a placed model fades one surface into
     /// another - a path into the grass beside it, a crack into the wall it is painted on.
     /// Separate from <see cref="Colors"/>, which carries only the three colour channels.
