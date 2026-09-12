@@ -13,6 +13,31 @@ public sealed class CaveMesh
     public int DroppedFaces { get; set; }
 
     /// <summary>
+    /// The texture coordinate a vertex was authored with, for geometry that carries one.
+    /// Terrain has none - its materials are projected on world axes - but a placed model
+    /// does, and its textures cannot be laid out without it.
+    /// </summary>
+    public List<Vector2> Uvs { get; } = [];
+
+    /// <summary>
+    /// The second coordinate, which a model's baked lighting is laid out in. Separate
+    /// because it is a per-model atlas rather than a tiling coordinate.
+    /// </summary>
+    public List<Vector2> BakeUvs { get; } = [];
+
+    /// <summary>
+    /// How many distinct ids <see cref="FaceMaterials"/> uses, when the table they index
+    /// is not <see cref="Materials"/> but one held beside the mesh.
+    /// </summary>
+    public int FaceMaterialCount { get; set; }
+
+    /// <summary>True when every vertex carries a texture coordinate.</summary>
+    public bool HasUvs => Uvs.Count == Vertices.Count && Vertices.Count > 0;
+
+    /// <summary>True when every vertex carries the baked-lighting coordinate as well.</summary>
+    public bool HasBakeUvs => BakeUvs.Count == Vertices.Count && Vertices.Count > 0;
+
+    /// <summary>
     /// The three material slots each vertex blends between, already offset by the owning
     /// node's base material. <see cref="FaceMaterials"/> only records the dominant slot,
     /// which is enough for export but loses the blend the game actually renders.
