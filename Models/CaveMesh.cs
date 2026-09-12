@@ -31,6 +31,16 @@ public sealed class CaveMesh
     /// </summary>
     public int FaceMaterialCount { get; set; }
 
+    /// <summary>
+    /// The alpha of a vertex's own colour, which is how a placed model fades one surface into
+    /// another - a path into the grass beside it, a crack into the wall it is painted on.
+    /// Separate from <see cref="Colors"/>, which carries only the three colour channels.
+    /// </summary>
+    public List<float> Alphas { get; } = [];
+
+    /// <summary>True when every vertex carries that alpha.</summary>
+    public bool HasAlphas => Alphas.Count == Vertices.Count && Vertices.Count > 0;
+
     /// <summary>True when every vertex carries a texture coordinate.</summary>
     public bool HasUvs => Uvs.Count == Vertices.Count && Vertices.Count > 0;
 
