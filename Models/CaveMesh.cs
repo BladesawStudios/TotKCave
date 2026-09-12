@@ -38,6 +38,13 @@ public sealed class CaveMesh
     public List<Vector2> Uvs2 { get; } = [];
 
     /// <summary>
+    /// The direction a vertex's texture runs in, with the handedness of its other axis in W.
+    /// A normal map is stored in that frame, and without it the frame has to be guessed from
+    /// how the coordinate changes across the screen.
+    /// </summary>
+    public List<Vector4> Tangents { get; } = [];
+
+    /// <summary>
     /// The alpha of a vertex's own colour, which is how a placed model fades one surface into
     /// another - a path into the grass beside it, a crack into the wall it is painted on.
     /// Separate from <see cref="Colors"/>, which carries only the three colour channels.
