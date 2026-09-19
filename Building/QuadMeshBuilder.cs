@@ -165,6 +165,13 @@ public static class QuadMeshBuilder
         // material alternate vertex to vertex and the terrain break into flat triangles.
         int weightsOff = layout.TryGetValue("_30", out int a30) ? a30 : -1;
 
+        // The side of the square the game makes of that block, and how many quad tiles fit
+        // across it. QuadMeshMgr::setupTextures picks 0x140 for the two large page sizes and
+        // 0xa0 for the two small ones; side * side * 2 is exactly one block either way.
+        int texSide = layout.TryGetValue("file_size", out int fileSize) ? TextureSide(fileSize) : 0;
+        int tilesPerRow = texSide / vps;
+        if (texSide <= 0 || tilesPerRow <= 0) weightsOff = -1;
+
         var (s0, s1) = res.GetStreamRange(i);
         for (uint j = s0; j < s1; j++)
         {
@@ -197,9 +204,22 @@ public static class QuadMeshBuilder
                 int[] imap = GetIndexMap(ns, top, right, bottom, left, single);
 
                 ReadOnlySpan<uint> block = MemoryMarshal.Cast<byte, uint>(page.AsSpan(pa0 + qi * blockBytes, blockBytes));
-                ReadOnlySpan<ushort> attrs = weightsOff >= 0
-                    ? MemoryMarshal.Cast<byte, ushort>(page.AsSpan(weightsOff + qi * nvq * 2, nvq * 2))
+
+                // The weights block is a texture, not an array of per-quad runs. The game
+                // uploads it whole as a square R5G5B5A1 image - QuadMeshMgr::setupTextures
+                // builds it from this offset at TextureSide(fileSize) on a side - and each
+                // quad owns one vps by vps tile of it, laid out left to right then top to
+                // bottom. Reading nvq consecutive texels instead walks across several
+                // quads' tiles and hands most vertices another quad's data.
+                ReadOnlySpan<ushort> weights = weightsOff >= 0
+                    ? MemoryMarshal.Cast<byte, ushort>(page.AsSpan(weightsOff, texSide * texSide * 2))
                     : default;
+                // A page can hold more quads than the texture has tiles - the two large page
+                // sizes fit exactly 4096 at five texels a side, but a 160 square one holds
+                // only 1024 - so a quad past the end has no tile to read and keeps the prior.
+                bool hasTile = !weights.IsEmpty && qi < tilesPerRow * tilesPerRow;
+                int tileX = hasTile ? (qi % tilesPerRow) * vps : 0;
+                int tileY = hasTile ? (qi / tilesPerRow) * vps : 0;
 
                 int sh = (int)((posFlags >> 18) & 0x1F);
                 long ox = ((((nx >> nsh) << 5) + (posFlags & 0x3F)) << 13) - 0x20000;
@@ -228,29 +248,31 @@ public static class QuadMeshBuilder
                         (oz + (dz << sh)) * sl + bz
                     );
 
-                    // A1RGB555: bit 15 is set on every texel of this block, so it is a
-                    // constant alpha and the three colour channels are 5 bits each. Green is
-                    // the ambient occlusion - it varies smoothly across the vertex grid
-                    // (mean neighbour difference 0.087, against 0.133 for the vertex
-                    // positions and 0.322 shuffled) and resolves into lit plateau tops and
-                    // dark crevices.
+                    // R5G5B5A1 as NVN packs it: red at bits 0-4, green 5-9, blue 10-14, and
+                    // alpha at bit 15, which is set on every texel of every page checked.
+                    // The game calls this sampler MaterialWeights_Ao, so it carries both.
                     //
-                    // The blend weights are NOT in this block, nor in the normals block, nor
-                    // in pos_adjust_offset1. Checked against the mate terrain archive, which
-                    // states the visible material per position: for a weight, its value would
-                    // have to be high exactly when its own slot is the visible one, and no
-                    // contiguous 4-6 bit field of any of those blocks separates the cases by
-                    // more than 0.07 where a real weight would separate them by about 0.5.
+                    // Green is the blend weight. Established in game rather than by
+                    // correlation: every quad was given the same three ids - a red
+                    // placeholder, grass and snow - so that the weight field painted itself
+                    // on screen, and then this block was flooded with one constant at a
+                    // time. All lanes zero gave the first slot, green at maximum gave the
+                    // third, and all lanes at maximum matched green alone. Red and blue
+                    // changed brightness far more than material, which is the Ao half.
                     //
-                    // The ids are ordered by prevalence instead. Over 21,112 ground samples
-                    // the first slot is the visible material 69.9% of the time, the second
-                    // 22.0% and the third 8.2%, and some slot holds it 82.8% of the time. So
-                    // weight them by that prior until the real weights are found: it agrees
-                    // with the terrain archive 57.9% of the time where the misread per-vertex
-                    // values managed 36.0%.
-                    ushort packed = attrs.IsEmpty ? (ushort)0 : attrs[slot];
-                    float ao = ((packed >> 5) & 0x1F) / 31.0f;
-                    Vector3 wts = SlotPrior;
+                    // An older comment here had green as the AO and concluded the weights
+                    // were absent from every per-vertex block. That measurement ran on the
+                    // misread addressing above, so it was comparing scrambled data.
+                    ushort packed = hasTile
+                        ? weights[(tileY + slot / vps) * texSide + tileX + slot % vps]
+                        : (ushort)0;
+                    float ao = (packed & 0x1F) / 31.0f;
+                    float blend = ((packed >> 5) & 0x1F) / 31.0f;
+
+                    // Slot 1 is missing from this: flooding the normals block showed the
+                    // middle id is picked by slope, not by anything stored per vertex, so it
+                    // cannot be read out of here. Walls will be wrong until that is modelled.
+                    Vector3 wts = hasTile ? new Vector3(1f - blend, 0f, blend) : SlotPrior;
 
                     if (weld)
                     {
@@ -398,6 +420,18 @@ public static class QuadMeshBuilder
     /// which are in the pages somewhere but have not been located.
     /// </summary>
     private static readonly Vector3 SlotPrior = new(0.699f, 0.220f, 0.082f);
+
+    /// <summary>
+    /// The side of the square texture the game builds from a page's per-vertex blocks, by
+    /// page size. Mirrors the sizes QuadMeshMgr::setupTextures accepts; anything else gets
+    /// zero, and the caller falls back to <see cref="SlotPrior"/> rather than guessing.
+    /// </summary>
+    private static int TextureSide(int fileSize) => fileSize switch
+    {
+        0x90000 or 0xec000 => 0x140,
+        0x48000 or 0x76000 => 0xa0,
+        _ => 0,
+    };
 
     private const int QuadMaterialCount = 121;
     private const float QuadUvScale = 1.0f / 33.0f;
