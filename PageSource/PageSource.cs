@@ -100,8 +100,36 @@ public sealed class CavePageSource : IPageSource
 
         if (!string.IsNullOrEmpty(_mcTool) && File.Exists(_mcTool))
         {
-            byte[] decompressed = DecompressWithTool(fid, decDir);
-            return Store(fid, decompressed, "meshcodec");
+            // The tool decompresses the whole cave in one run, and the mesh builder asks for
+            // pages from every core at once. Unguarded, each worker that missed started its
+            // own run into the same folder, and one would read a page while another run was
+            // still rewriting it: "being used by another process", on the first load of a cave
+            // and only when the timing lined up. One run per cave, then, and the workers that
+            // waited for it read what it wrote. The lock covers this process; the mutex covers
+            // a second viewer or a test run pointed at the same romfs.
+            lock (_decompressGate)
+            {
+                if (_cache.TryGetValue(fid, out cached)) return cached;
+
+                using Mutex folder = new(false, MutexName(decDir));
+                try { folder.WaitOne(); }
+                catch (AbandonedMutexException) { /* its holder died; the stamp check below decides */ }
+
+                try
+                {
+                    // Whoever held it may have finished the job.
+                    if (!IsCacheStamped(decDir)) DecompressWithTool(decDir);
+                }
+                finally
+                {
+                    folder.ReleaseMutex();
+                }
+            }
+
+            if (!File.Exists(decCand))
+                throw new FileNotFoundException($"Decompressed page output missing: {decCand}");
+
+            return Store(fid, File.ReadAllBytes(decCand), "meshcodec");
         }
 
         throw new FileNotFoundException(
@@ -117,7 +145,21 @@ public sealed class CavePageSource : IPageSource
         return data;
     }
 
-    private byte[] DecompressWithTool(int fid, string decDir)
+    private readonly object _decompressGate = new();
+
+    /// <summary>
+    /// A machine-wide name for one cave's output folder. Mutex names cannot hold backslashes,
+    /// and the path is compared without case the way Windows compares it.
+    /// </summary>
+    private static string MutexName(string decDir)
+    {
+        byte[] hash = System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(Path.GetFullPath(decDir).ToUpperInvariant()));
+        return $"TotkCave-mc-{Convert.ToHexString(hash, 0, 16)}";
+    }
+
+    /// <summary>Runs the tool over the whole cave, then stamps the folder as complete.</summary>
+    private void DecompressWithTool(string decDir)
     {
         Directory.CreateDirectory(decDir);
 
@@ -134,25 +176,24 @@ public sealed class CavePageSource : IPageSource
         using Process process = Process.Start(startInfo)
             ?? throw new InvalidOperationException($"Failed to start MeshCodec process '{_mcTool}'.");
 
+        // Drained while it runs: the tool prints a line per page, and a pipe nobody reads fills
+        // and stops it mid-write, with this side waiting for it to exit.
+        Task<string> stdout = process.StandardOutput.ReadToEndAsync();
+        Task<string> stderr = process.StandardError.ReadToEndAsync();
         process.WaitForExit();
-        if (process.ExitCode != 0)
-        {
-            string err = process.StandardError.ReadToEnd();
-            throw new InvalidOperationException($"MeshCodec decompression failed (Exit code {process.ExitCode}): {err}");
-        }
+        stdout.Wait();
 
+        if (process.ExitCode != 0)
+            throw new InvalidOperationException(
+                $"MeshCodec decompression failed (Exit code {process.ExitCode}): {stderr.Result}");
+
+        // Last, so a folder only reads as finished once every page in it is.
         try
         {
             string stampFile = Path.Combine(decDir, CacheStamp);
             File.WriteAllText(stampFile, $"{CacheTag}\ntool: {_mcTool}\n");
         }
         catch { }
-
-        string outPath = Path.Combine(decDir, $"{fid:D6}");
-        if (!File.Exists(outPath))
-            throw new FileNotFoundException($"Decompressed page output missing: {outPath}");
-
-        return File.ReadAllBytes(outPath);
     }
 
     private static bool IsCacheStamped(string decDir)
