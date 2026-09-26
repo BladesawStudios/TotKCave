@@ -93,7 +93,7 @@ public static class QuadMeshBuilder
 
         foreach (int i in nodeIndices)
         {
-            var (verts, faces, _, _, _, _) = DecodeNodeGeometry(res, pages, i, targetLod, weld);
+            var (verts, faces, _, _, _, _, _) = DecodeNodeGeometry(res, pages, i, targetLod, weld);
             nodesProcessed++;
 
             int vCount = verts.Count;
@@ -121,7 +121,7 @@ public static class QuadMeshBuilder
 
     private static (List<Vector3> Verts, List<(int A, int B, int C)> Faces,
                     List<(int A, int B, int C)> Slots, List<Vector3> Weights,
-                    List<Vector3> Ao, List<int> FaceMats) DecodeNodeGeometry(
+                    List<Vector3> Ao, List<Vector3> Normals, List<int> FaceMats) DecodeNodeGeometry(
         QuadResource res,
         IPageSource pages,
         int i,
@@ -133,6 +133,7 @@ public static class QuadMeshBuilder
         List<(int A, int B, int C)> localSlots = [];
         List<Vector3> localWeights = [];
         List<Vector3> localAo = [];
+        List<Vector3> localNormals = [];
         List<int> localFaceMats = [];
         Dictionary<(Vector3 P, int S0, int S1, int S2), int> vmap = [];
 
@@ -152,25 +153,29 @@ public static class QuadMeshBuilder
         int pa0 = layout["pos_adjust_offset0"];
         int qdo = layout["quad_data_offset"];
 
-        // Two per-vertex 2-byte maps, back to back: the weights and AO the shader calls
-        // cCaveQuadMeshMaterialWeights_Ao, then the normals it calls cCaveQuadMeshNormals.
+        // Two per-vertex 2-byte maps, back to back: the normals the shader calls
+        // cCaveQuadMeshNormals, then the weights and AO it calls
+        // cCaveQuadMeshMaterialWeights_Ao. They used to be taken the other way round.
         //
-        // They are easy to mix up - both are RGB565-shaped - so tell them apart by what the
-        // fields do across the vertex grid. Weights vary smoothly: in the first block the
-        // red and blue channels have a mean neighbour difference of 0.055 and 0.108, against
-        // 0.133 for the vertex positions and 0.322 for the same values shuffled. In the
-        // second they are 0.239 and 0.257, barely better than shuffled, because they are a
-        // normal's tangential pair - and they satisfy |x| + |y| <= 1, the octahedral
-        // constraint, on every vertex. Reading the normals as weights makes the dominant
-        // material alternate vertex to vertex and the terrain break into flat triangles.
-        int weightsOff = layout.TryGetValue("_30", out int a30) ? a30 : -1;
+        // _30 is the normal, R5G5B5A1 with each channel decoded as (v - 16) / 15 - the
+        // shader's fma(t, 2.0667, -1.0667) on a 5-bit channel. Decoded that way it agrees
+        // with the normal of the vertex grid itself at a mean dot of 0.982, signed; every
+        // decode of _34 as a normal scores about 0.5, which is chance. Its three channels
+        // all peak at 10, 16 and 22, symmetric about zero, as a vector's components do.
+        //
+        // _34 is R5G6B5. Red and blue are the blend weights - both sit at 0 or 31 most of
+        // the time, as a weight painted between two materials does - and green is the
+        // occlusion, which the shader square-roots into the G-buffer's AO and never uses
+        // as a weight. The two had been read as the normal's tangential pair.
+        int normalsOff = layout.TryGetValue("_30", out int a30) ? a30 : -1;
+        int weightsOff = layout.TryGetValue("_34", out int a34) ? a34 : -1;
 
         // The side of the square the game makes of that block, and how many quad tiles fit
         // across it. QuadMeshMgr::setupTextures picks 0x140 for the two large page sizes and
         // 0xa0 for the two small ones; side * side * 2 is exactly one block either way.
         int texSide = layout.TryGetValue("file_size", out int fileSize) ? TextureSide(fileSize) : 0;
         int tilesPerRow = texSide / vps;
-        if (texSide <= 0 || tilesPerRow <= 0) weightsOff = -1;
+        if (texSide <= 0 || tilesPerRow <= 0) weightsOff = normalsOff = -1;
 
         var (s0, s1) = res.GetStreamRange(i);
         for (uint j = s0; j < s1; j++)
@@ -194,9 +199,9 @@ public static class QuadMeshBuilder
                 int single = (int)((matFlags >> 31) & 1);
 
                 // Three 7-bit material ids, at the bit positions the quad mesh fragment
-                // shader unpacks them from. It picks its third id from bits 24-30 instead
-                // on one triangle half of the quad, but the two agree on 99.5% of quads, so
-                // the halves are not split here.
+                // shader unpacks them from, weighted by red, blue and what the two leave.
+                // It picks its third id from bits 24-30 instead on the far triangle half of
+                // the quad, but the two agree on 99.5% of quads, so the halves are not split.
                 int mat0 = (int)((matFlags >> 3) & 0x7F);
                 int mat1 = (int)((matFlags >> 10) & 0x7F);
                 int mat2 = (int)((matFlags >> 17) & 0x7F);
@@ -213,6 +218,9 @@ public static class QuadMeshBuilder
                 // quads' tiles and hands most vertices another quad's data.
                 ReadOnlySpan<ushort> weights = weightsOff >= 0
                     ? MemoryMarshal.Cast<byte, ushort>(page.AsSpan(weightsOff, texSide * texSide * 2))
+                    : default;
+                ReadOnlySpan<ushort> normals = normalsOff >= 0
+                    ? MemoryMarshal.Cast<byte, ushort>(page.AsSpan(normalsOff, texSide * texSide * 2))
                     : default;
                 // A page can hold more quads than the texture has tiles - the two large page
                 // sizes fit exactly 4096 at five texels a side, but a 160 square one holds
@@ -248,19 +256,29 @@ public static class QuadMeshBuilder
                         (oz + (dz << sh)) * sl + bz
                     );
 
-                    // R5G5B5A1 as NVN packs it: red at bits 0-4, green 5-9, blue 10-14, and
-                    // alpha at bit 15, which is set on every texel of every page checked.
-                    // The game calls this sampler MaterialWeights_Ao, so it carries both.
-
-                    ushort packed = hasTile
-                        ? weights[(tileY + slot / vps) * texSide + tileX + slot % vps]
-                        : (ushort)0;
-                    float ao = ((packed >> 5) & 0x1F) / 31.0f;
-
-                    // Ordered by prevalence until the real weights are found. Over 21,112
-                    // ground samples the first slot is the visible material 69.9% of the
-                    // time, the second 22.0% and the third 8.2%.
+                    // R5G6B5: red at bits 0-4, green 5-10, blue 11-15. The shader's three
+                    // weights are red, blue, and whatever the two leave of one, each clamped
+                    // - so where red and blue already sum past one the third slot is out.
+                    int texel = (tileY + slot / vps) * texSide + tileX + slot % vps;
                     Vector3 wts = SlotPrior;
+                    float ao = 1f;
+                    Vector3 n = Vector3.Zero;
+
+                    if (hasTile)
+                    {
+                        ushort packed = weights[texel];
+                        float r = (packed & 0x1F) / 31f;
+                        float b = (packed >> 11) / 31f;
+                        wts = new Vector3(r, b, Math.Clamp(1f - r - b, 0f, 1f));
+                        ao = ((packed >> 5) & 0x3F) / 63f;
+
+                        ushort nt = normals[texel];
+                        n = new Vector3(
+                            ((nt & 0x1F) - 16) / 15f,
+                            (((nt >> 5) & 0x1F) - 16) / 15f,
+                            (((nt >> 10) & 0x1F) - 16) / 15f);
+                        n = n.LengthSquared() > 1e-8f ? Vector3.Normalize(n) : Vector3.Zero;
+                    }
 
                     if (weld)
                     {
@@ -276,6 +294,7 @@ public static class QuadMeshBuilder
                             localSlots.Add((mat0, mat1, mat2));
                             localWeights.Add(wts);
                             localAo.Add(new Vector3(ao, ao, ao));
+                            localNormals.Add(n);
                         }
                         localIndices[slotIdx] = localIdx;
                     }
@@ -286,6 +305,7 @@ public static class QuadMeshBuilder
                         localSlots.Add((mat0, mat1, mat2));
                         localWeights.Add(wts);
                         localAo.Add(new Vector3(ao, ao, ao));
+                        localNormals.Add(n);
                         localIndices[slotIdx] = localIdx;
                     }
                 }
@@ -308,7 +328,7 @@ public static class QuadMeshBuilder
             }
         }
 
-        return (localVerts, localFaces, localSlots, localWeights, localAo, localFaceMats);
+        return (localVerts, localFaces, localSlots, localWeights, localAo, localNormals, localFaceMats);
     }
 
     public static CaveMesh BuildMesh(
@@ -356,7 +376,7 @@ public static class QuadMeshBuilder
         
         var nodeResults = new (List<Vector3> Verts, List<(int A, int B, int C)> Faces,
                                List<(int A, int B, int C)> Slots, List<Vector3> Weights,
-                               List<Vector3> Ao, List<int> FaceMats)[totalNodes];
+                               List<Vector3> Ao, List<Vector3> Normals, List<int> FaceMats)[totalNodes];
         int completedCount = 0;
 
         Parallel.For(0, totalNodes, parallelOptions, idx =>
@@ -378,6 +398,7 @@ public static class QuadMeshBuilder
             mesh.VertexMaterials.AddRange(resNode.Slots);
             mesh.VertexWeights.AddRange(resNode.Weights);
             mesh.Colors.AddRange(resNode.Ao);
+            mesh.Normals.AddRange(resNode.Normals);
 
             for (int f = 0; f < resNode.Faces.Count; f++)
             {
@@ -397,15 +418,12 @@ public static class QuadMeshBuilder
     /// indirection, so the entries here are generated rather than read.
     /// </summary>
     /// <remarks>
-    /// The projection is planar on world XZ, which is what a heightfield wants. The tiling
-    /// is a stand-in: the shader scales its UVs per material from a constant buffer that is
-    /// not in the archive, so the real per-material scales are not recoverable from the
-    /// shader alone. Everything else here - the layer, the projection - is exact.
+    /// The axes are nominal: the shader picks its projection from the surface normal, which
+    /// the viewer does under triplanar. The tiling is per layer; see <see cref="LayerUvScale"/>.
     /// </remarks>
     /// <summary>
-    /// How much each material slot contributes, from how often each turns out to be the
-    /// material the terrain archive says is visible. A stand-in for the per-vertex weights,
-    /// which are in the pages somewhere but have not been located.
+    /// How much each material slot contributes where a quad has no tile in the page's weight
+    /// texture to read. Measured from how often each slot turns out to be the visible material.
     /// </summary>
     private static readonly Vector3 SlotPrior = new(0.699f, 0.220f, 0.082f);
 
@@ -422,7 +440,30 @@ public static class QuadMeshBuilder
     };
 
     private const int QuadMaterialCount = 121;
-    private const float QuadUvScale = 1.0f / 33.0f;
+
+    /// <summary>
+    /// Each array layer's tiling, in repeats per metre. The shader reads it per layer from
+    /// cave_StaticDataUBO (a vec4 per layer from 0x610, x the scale), which is filled at
+    /// runtime rather than shipped. Every chunked cave's material table names a layer and a
+    /// scale, though, and across all 392 of them each layer only ever has one scale - so the
+    /// table is global, and this is it. Layers no cave uses take the commonest value, 0.05.
+    /// </summary>
+    private static readonly float[] LayerUvScale =
+    [
+        0.1f, 0.05f, 0.1f, 0.04f, 0.05f, 0.1f, 0.05f, 0.05f, 0.1f, 0.1f,                // 0
+        1f / 15f, 0.09f, 0.05f, 0.2f, 0.2f, 0.05f, 0.05f, 0.05f, 0.05f, 0.05f,          // 10
+        0.05f, 0.07f, 0.07f, 0.05f, 0.15f, 0.1f, 0.1f, 0.07f, 0.1f, 0.05f,              // 20
+        0.03f, 0.05f, 0.2f, 0.2f, 0.1f, 0.2f, 0.15f, 0.2f, 0.35f, 0.2f,                 // 30
+        0.1f, 0.05f, 1f / 6f, 0.15f, 0.2f, 0.05f, 0.05f, 0.1f, 0.05f, 0.05f,            // 40
+        0.1f, 0.1f, 0.05f, 0.05f, 0.05f, 0.1f, 0.08f, 0.04f, 0.1f, 0.05f,               // 50
+        0.08f, 0.25f, 0.04f, 0.08f, 0.08f, 0.2f, 0.1f, 0.15f, 0.04f, 0.25f,             // 60
+        0.05f, 0.15f, 0.08f, 0.1f, 0.07f, 0.05f, 0.23f, 0.16f, 0.16f, 0.04f,            // 70
+        0.1f, 0.05f, 0.1f, 0.2f, 0.09f, 0.07f, 0.09f, 0.2f, 0.05f, 0.05f,               // 80
+        0.25f, 0.05f, 0.05f, 0.09f, 0.2f, 0.1f, 0.125f, 0.05f, 0.05f, 0.05f,            // 90
+        0.05f, 0.1f, 0.1f, 0.05f, 0.32f, 0.07f, 0.1f, 0.3f, 0.07f, 0.05f,               // 100
+        0.025f, 0.08f, 0.05f, 0.32f, 0.05f, 0.05f, 0.05f, 0.05f, 0.05f, 0.1f,           // 110
+        0.05f,                                                                          // 120
+    ];
 
     private static List<CrBinMaterial> BuildQuadMaterials()
     {
@@ -431,7 +472,7 @@ public static class QuadMeshBuilder
         {
             materials.Add(new CrBinMaterial(
                 new Vector3(1f, 0f, 0f), id,
-                new Vector3(0f, 0f, 1f), QuadUvScale));
+                new Vector3(0f, 0f, 1f), LayerUvScale[id]));
         }
         return materials;
     }
