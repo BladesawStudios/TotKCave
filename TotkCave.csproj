@@ -13,8 +13,17 @@
     <PackageLicenseExpression>GPL-3.0-or-later</PackageLicenseExpression>
   </PropertyGroup>
 
+  <!--
+    McSharp decodes the romfs cave pages, and brings the zstd the quad pages use with it. A
+    sibling checkout wins (the viewer vendors both side by side); otherwise the package.
+  -->
+  <PropertyGroup>
+    <McSharpProject Condition="'$(McSharpProject)' == ''">$(MSBuildThisFileDirectory)..\McSharp\src\McSharp\McSharp.csproj</McSharpProject>
+  </PropertyGroup>
+
   <ItemGroup>
-    <PackageReference Include="ZstdSharp.Port" Version="0.8.8" />
+    <ProjectReference Include="$(McSharpProject)" Condition="Exists('$(McSharpProject)')" />
+    <PackageReference Include="MeshCodecSharp" Version="1.1.1" Condition="!Exists('$(McSharpProject)')" />
     <None Include="README.md" Pack="true" PackagePath="\" />
   </ItemGroup>
 
