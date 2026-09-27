@@ -11,6 +11,7 @@ public sealed class CavePageSource : IPageSource
     private readonly string? _pagesDir;
     private readonly ConcurrentDictionary<int, byte[]> _cache = new();
     private readonly Dictionary<int, ushort> _blocks = [];
+    private readonly Func<string, string>? _resolve;
 
     /// <summary>
     /// MeshCodec scratch, one per thread and grown to the largest page seen. The mesh builder
@@ -20,10 +21,14 @@ public sealed class CavePageSource : IPageSource
 
     public string SourceKind { get; private set; } = "unknown";
 
-    public CavePageSource(CrBin crbin, string? caveDir = null, string? pagesDir = null)
+    /// <param name="resolve">
+    /// Maps a page's path in the dump to the file to read in its place - a mod's copy, say.
+    /// </param>
+    public CavePageSource(CrBin crbin, string? caveDir = null, string? pagesDir = null, Func<string, string>? resolve = null)
     {
         _crbin = crbin;
         _pagesDir = pagesDir;
+        _resolve = resolve;
 
         foreach (CrBinPageFile pf in crbin.PageFiles)
         {
@@ -67,8 +72,8 @@ public sealed class CavePageSource : IPageSource
         if (_cache.TryGetValue(fid, out byte[]? cached))
             return cached;
 
-        string chunkDir = _crbin.ChunkDirPath;
-        string chunkFile = Path.Combine(chunkDir, $"{fid:D6}.chunk");
+        string chunkFile = PathOf(_crbin, fid);
+        if (_resolve is not null) chunkFile = _resolve(chunkFile);
 
         if (File.Exists(chunkFile) && IsDecompressedPage(chunkFile, fid))
         {
@@ -90,6 +95,25 @@ public sealed class CavePageSource : IPageSource
         }
 
         throw new FileNotFoundException($"No page available for chunk {fid:D6}: {chunkFile} is missing.");
+    }
+
+    /// <summary>Where a page file lives beside the crbin in the dump, whether or not it is there.</summary>
+    public static string PathOf(CrBin crbin, int fid) => Path.Combine(crbin.ChunkDirPath, $"{fid:D6}.chunk");
+
+    /// <summary>
+    /// A page file's data: the vertices, then the indices. Reads the shipped MeshCodec pages
+    /// and the zstd ones <c>McSharp.ChunkEncoder</c> writes alike.
+    /// </summary>
+    public static byte[] Unpack(byte[] src, string what)
+    {
+        if (!MeshCodec.TryReadChunkHeader(src, out ResChunkHeader header))
+            throw new InvalidDataException($"Not a chunk page: {what}");
+
+        byte[] work = new byte[Math.Max(header.WorkMemSize, 0x40000u)];
+        byte[] dst = new byte[header.DecompressedSize];
+        if (!MeshCodec.DecompressChunk(dst, src, work))
+            throw new InvalidDataException($"Could not decode {what}");
+        return dst;
     }
 
     /// <summary>

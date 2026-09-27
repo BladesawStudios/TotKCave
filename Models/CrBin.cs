@@ -29,6 +29,47 @@ public sealed class CrBin
         return FromBytes(data, path);
     }
 
+    /// <summary>
+    /// Reads a crbin through a mod: the bytes from wherever <paramref name="resolve"/> sends the
+    /// path, while <see cref="Path"/> - which the pages are found beside - stays the dump's.
+    /// </summary>
+    public static CrBin FromFile(string path, Func<string, string>? resolve) =>
+        FromBytes(File.ReadAllBytes(resolve?.Invoke(path) ?? path), path);
+
+    /// <summary>
+    /// A crbin's bytes with material entries appended to its table. The table is the last but
+    /// one block of the file - only the page file table follows it - so the entries go in
+    /// before that, and its offset moves along.
+    /// </summary>
+    public static byte[] AppendMaterials(ReadOnlySpan<byte> crbin, IReadOnlyList<CrBinMaterial> added)
+    {
+        if (added.Count == 0) return crbin.ToArray();
+
+        uint hOff = MemoryMarshal.Read<uint>(crbin[0xA0..]);
+        uint hCnt = MemoryMarshal.Read<uint>(crbin[0xA4..]);
+        uint iOff = MemoryMarshal.Read<uint>(crbin[0xA8..]);
+        uint at = hOff + hCnt * 32;
+        if (at != iOff)
+            throw new InvalidDataException("The material table is not followed directly by the page file table.");
+
+        byte[] result = new byte[crbin.Length + added.Count * 32];
+        crbin[..(int)at].CopyTo(result);
+        for (int i = 0; i < added.Count; i++)
+        {
+            Span<byte> e = result.AsSpan((int)at + i * 32, 32);
+            CrBinMaterial m = added[i];
+            MemoryMarshal.Write(e, m.UBias.X); MemoryMarshal.Write(e[4..], m.UBias.Y); MemoryMarshal.Write(e[8..], m.UBias.Z);
+            MemoryMarshal.Write(e[12..], m.ArrayLayer);
+            MemoryMarshal.Write(e[16..], m.VBias.X); MemoryMarshal.Write(e[20..], m.VBias.Y); MemoryMarshal.Write(e[24..], m.VBias.Z);
+            MemoryMarshal.Write(e[28..], m.UvScale);
+        }
+        crbin[(int)at..].CopyTo(result.AsSpan((int)at + added.Count * 32));
+
+        MemoryMarshal.Write(result.AsSpan(0xA4), hCnt + (uint)added.Count);
+        MemoryMarshal.Write(result.AsSpan(0xA8), iOff + (uint)added.Count * 32);
+        return result;
+    }
+
     public static CrBin FromBytes(ReadOnlySpan<byte> d, string path = "")
     {
         if (d.Length < 0x1DC || !d[..8].SequenceEqual(MagicBytes))

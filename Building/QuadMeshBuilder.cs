@@ -467,6 +467,10 @@ public static class QuadMeshBuilder
         0.05f,                                                                          // 120
     ];
 
+    /// <summary>A layer's tiling in repeats per metre - the one every cave that uses it gives it.</summary>
+    public static float UvScaleOf(int layer) =>
+        layer >= 0 && layer < LayerUvScale.Length ? LayerUvScale[layer] : 0.05f;
+
     private static List<CrBinMaterial> BuildQuadMaterials()
     {
         List<CrBinMaterial> materials = new(QuadMaterialCount);
