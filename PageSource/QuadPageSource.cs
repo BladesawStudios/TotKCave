@@ -8,14 +8,39 @@ public sealed class QuadPageSource : IPageSource
 {
     private readonly QuadResource _resource;
     private readonly string? _pagesDir;
+    private readonly Func<string, string>? _resolve;
     private readonly ConcurrentDictionary<int, byte[]> _cache = new();
 
     public string SourceKind { get; private set; } = "quad";
 
-    public QuadPageSource(QuadResource resource, string? pagesDir = null)
+    /// <param name="resolve">
+    /// Maps a page's path in the dump to the file to read in its place - a mod's copy, say.
+    /// </param>
+    public QuadPageSource(QuadResource resource, string? pagesDir = null, Func<string, string>? resolve = null)
     {
         _resource = resource;
         _pagesDir = pagesDir;
+        _resolve = resolve;
+    }
+
+    /// <summary>Where a page file lives beside the resource in the dump, whether or not it is there.</summary>
+    public static string PathOf(QuadResource resource, int fid)
+    {
+        (_, uint pageId) = resource.GetPageFile(fid);
+        return Path.Combine(resource.Path + $".{resource.Id:x8}", $"{pageId:D6}.quad");
+    }
+
+    /// <summary>
+    /// A page file's bytes decompressed: as they are when a console dump left them so, or
+    /// after the resource's id and a plain zstd frame.
+    /// </summary>
+    public static byte[] Unpack(QuadResource resource, int fid, byte[] raw)
+    {
+        (uint decompressedSize, _) = resource.GetPageFile(fid);
+        if (raw.Length == decompressedSize) return raw;
+        if (raw.Length > 4 && MemoryMarshal.Read<uint>(raw) == resource.Id)
+            return DecompressZstdFrame(raw.AsSpan(4), (int)decompressedSize);
+        return raw;
     }
 
     public byte[] GetPage(int fid)
@@ -38,6 +63,8 @@ public sealed class QuadPageSource : IPageSource
 
         if (!File.Exists(cand1) && File.Exists(cand2))
             cand1 = cand2;
+
+        if (_resolve is not null) cand1 = _resolve(cand1);
 
         if (!File.Exists(cand1))
             throw new FileNotFoundException($"Quad page file missing for page {pageId} (index {fid}): {cand1}");

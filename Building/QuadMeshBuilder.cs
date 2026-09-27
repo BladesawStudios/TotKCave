@@ -432,6 +432,8 @@ public static class QuadMeshBuilder
     /// page size. Mirrors the sizes QuadMeshMgr::setupTextures accepts; anything else gets
     /// zero, and the caller falls back to <see cref="SlotPrior"/> rather than guessing.
     /// </summary>
+    internal static int TextureSideOf(int fileSize) => TextureSide(fileSize);
+
     private static int TextureSide(int fileSize) => fileSize switch
     {
         0x90000 or 0xec000 => 0x140,
