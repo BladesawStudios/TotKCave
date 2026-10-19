@@ -11,14 +11,16 @@
     <Description>C# library for parsing, decompressing, building, and exporting Tears of the Kingdom cave and quad mesh files.</Description>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageLicenseExpression>GPL-3.0-or-later</PackageLicenseExpression>
+    <DefaultItemExcludes>$(DefaultItemExcludes);lib/**</DefaultItemExcludes>
   </PropertyGroup>
 
   <!--
-    McSharp decodes the romfs cave pages, and brings the zstd the quad pages use with it. A
-    sibling checkout wins (the viewer vendors both side by side); otherwise the package.
+    McSharp decodes the romfs cave pages, and brings the zstd the quad pages use with it. It is a
+    submodule in lib; without one checked out, the package.
   -->
   <PropertyGroup>
-    <McSharpProject Condition="'$(McSharpProject)' == ''">$(MSBuildThisFileDirectory)..\McSharp\src\McSharp\McSharp.csproj</McSharpProject>
+    <TotkCaveLibRoot Condition="'$(TotkCaveLibRoot)' == ''">$(MSBuildThisFileDirectory)lib</TotkCaveLibRoot>
+    <McSharpProject Condition="'$(McSharpProject)' == ''">$(TotkCaveLibRoot)\McSharp\src\McSharp\McSharp.csproj</McSharpProject>
   </PropertyGroup>
 
   <ItemGroup>
