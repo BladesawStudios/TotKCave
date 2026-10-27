@@ -364,6 +364,27 @@ public static class QuadMeshBuilder
             matchingNodeIndices.Add(i);
         }
 
+        return BuildMesh(res, pages, matchingNodeIndices, targetLod, weld, maxDegreeOfParallelism, progressCallback);
+    }
+
+    /// <summary>
+    /// Builds exactly the given nodes, in the order given. A node's bounds are the box of its
+    /// own geometry rather than a cell of the tree, so neighbours at one level overlap and a
+    /// region cannot pick one node alone.
+    /// </summary>
+    public static CaveMesh BuildMesh(
+        QuadResource res,
+        IPageSource pages,
+        IReadOnlyList<int> nodes,
+        int lod,
+        bool weld = true,
+        int maxDegreeOfParallelism = -1,
+        Action<int, int>? progressCallback = null)
+    {
+        int targetLod = lod;
+        CaveMesh mesh = new();
+        IReadOnlyList<int> matchingNodeIndices = nodes;
+
         int totalNodes = matchingNodeIndices.Count;
         if (totalNodes == 0) return mesh;
 
